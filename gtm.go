@@ -36,12 +36,12 @@ const (
 )
 
 type Options struct {
-	After               TimestampGenerator
+	After               TimestampGenerator // if nil defaults to gtm.LastOpTimestamp; not yet supported for ChangeStreamNS
 	Filter              OpFilter
 	NamespaceFilter     OpFilter
 	OpLogDisabled       bool
-	OpLogDatabaseName   *string
-	OpLogCollectionName *string
+	OpLogDatabaseName   string
+	OpLogCollectionName string
 	CursorTimeout       *string // deprecated
 	ChannelSize         int
 	BufferSize          int
@@ -69,7 +69,7 @@ type Op struct {
 	Timestamp         bson.MongoTimestamp    `json:"timestamp"`
 	Source            QuerySource            `json:"source"`
 	Doc               interface{}            `json:"doc,omitempty"`
-	UpdateDescription map[string]interface{} `json:"updateDescription,omitempty`
+	UpdateDescription map[string]interface{} `json:"updateDescription,omitempty"`
 }
 
 type OpLog struct {
@@ -812,8 +812,8 @@ func (this *Op) ParseLogEntry(entry *OpLog, options *Options) (include bool, err
 }
 
 func OpLogCollection(session *mgo.Session, options *Options) *mgo.Collection {
-	localDB := session.DB(*options.OpLogDatabaseName)
-	return localDB.C(*options.OpLogCollectionName)
+	localDB := session.DB(options.OpLogDatabaseName)
+	return localDB.C(options.OpLogCollectionName)
 }
 
 func ParseTimestamp(timestamp bson.MongoTimestamp) (int32, int32) {
@@ -1497,14 +1497,14 @@ func DefaultOptions() *Options {
 		After:               LastOpTimestamp,
 		Filter:              nil,
 		NamespaceFilter:     nil,
-		OpLogDatabaseName:   &defaultOpLogDatabaseName,
-		OpLogCollectionName: &defaultOpLogCollectionName,
+		OpLogDatabaseName:   defaultOpLogDatabaseName,
+		OpLogCollectionName: defaultOpLogCollectionName,
 		OpLogDisabled:       false,
 		ChannelSize:         2048,
 		BufferSize:          50,
 		BufferDuration:      time.Duration(75) * time.Millisecond,
 		Ordering:            Oplog,
-		WorkerCount:         10,
+		WorkerCount:         1,
 		MaxWaitSecs:         10,
 		UpdateDataAsDelta:   false,
 		DirectReadNs:        []string{},
@@ -1558,10 +1558,10 @@ func (this *Options) SetDefaults() {
 	if this.After == nil && len(this.ChangeStreamNs) == 0 {
 		this.After = defaultOpts.After
 	}
-	if this.OpLogDatabaseName == nil {
+	if this.OpLogDatabaseName == "" {
 		this.OpLogDatabaseName = defaultOpts.OpLogDatabaseName
 	}
-	if this.OpLogCollectionName == nil {
+	if this.OpLogCollectionName == "" {
 		this.OpLogCollectionName = defaultOpts.OpLogCollectionName
 	}
 	if this.MaxWaitSecs == 0 {
