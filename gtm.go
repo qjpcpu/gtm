@@ -22,56 +22,64 @@ var defaultOpLogCollectionName = "oplog.rs"
 type OrderingGuarantee int
 
 const (
-	Oplog     OrderingGuarantee = iota // ops sent in oplog order (strong ordering)
-	Namespace                          // ops sent in oplog order within a namespace
-	Document                           // ops sent in oplog order for a single document
-	AnyOrder                           // ops sent as they become available
+	// Oplog strict follow op log order
+	Oplog OrderingGuarantee = iota // ops sent in oplog order (strong ordering)
+	// Namesapce keep order under same unamesapce
+	Namespace // ops sent in oplog order within a namespace
+	// Document keep order under same doc(ObjectId)
+	Document // ops sent in oplog order for a single document
+	// AnyOrder same as Document
+	AnyOrder // ops sent as they become available
 )
 
 type QuerySource int
 
 const (
+	// OplogQuerySource via oplog
 	OplogQuerySource QuerySource = iota
+	// DirectQuerySource via read directly
 	DirectQuerySource
 )
 
 type Options struct {
 	After               TimestampGenerator // if nil defaults to gtm.LastOpTimestamp; not yet supported for ChangeStreamNS
-	Filter              OpFilter
-	NamespaceFilter     OpFilter
-	OpLogDisabled       bool
-	OpLogDatabaseName   string
-	OpLogCollectionName string
-	CursorTimeout       *string // deprecated
-	ChannelSize         int
-	BufferSize          int
-	BufferDuration      time.Duration
-	Ordering            OrderingGuarantee
-	WorkerCount         int
+	Filter              OpFilter           // op filter function that has access to type/ns/data
+	NamespaceFilter     OpFilter           // op filter function that has access to type/ns ONLY
+	OpLogDisabled       bool               // true to disable tailing the MongoDB oplog
+	OpLogDatabaseName   string             // defaults to "local"
+	OpLogCollectionName string             // defaults to "oplog.rs"
+	CursorTimeout       *string            // deprecated
+	ChannelSize         int                // defaults to 20
+	BufferSize          int                // defaults to 50. used to batch fetch documents on bursts of activity
+	BufferDuration      time.Duration      // defaults to 750 ms. after this timeout the batch is force fetched
+	Ordering            OrderingGuarantee  // defaults to gtm.Oplog. ordering guarantee of events on the output channel as compared to the oplog
+	WorkerCount         int                // defaults to 1. number of go routines batch fetching concurrently
 	MaxWaitSecs         int
-	UpdateDataAsDelta   bool
-	ChangeStreamNs      []string
-	DirectReadNs        []string
+	UpdateDataAsDelta   bool     // set to true to only receive delta information in the Data field on updates (info straight from oplog)
+	ChangeStreamNs      []string // MongoDB 3.6+ only; set to a slice to namespaces to read via MongoDB change streams
+	DirectReadNs        []string // set to a slice of namespaces to read data directly from bypassing the oplog
 	DirectReadFilter    OpFilter
-	DirectReadSplitMax  int
+	DirectReadSplitMax  int // the max number of times to split a collection for concurrent reads (impacts memory consumption)
 	Unmarshal           DataUnmarshaller
-	Pipe                PipelineBuilder
-	PipeAllowDisk       bool
-	SplitVector         bool
+	Pipe                PipelineBuilder // an optional function to build aggregation pipelines
+	PipeAllowDisk       bool            // true to allow MongoDB to use disk for aggregation pipeline options with large result sets
+	SplitVector         bool            // whether or not to use internal MongoDB command split vector to split collections
 	Log                 *log.Logger
 }
 
+// Op oplog parsed detail
 type Op struct {
 	Id                interface{}            `json:"_id"`
 	Operation         string                 `json:"operation"`
 	Namespace         string                 `json:"namespace"`
 	Data              map[string]interface{} `json:"data,omitempty"`
 	Timestamp         bson.MongoTimestamp    `json:"timestamp"`
-	Source            QuerySource            `json:"source"`
+	Source            QuerySource            `json:"source"` // oplog or direct read
 	Doc               interface{}            `json:"doc,omitempty"`
 	UpdateDescription map[string]interface{} `json:"updateDescription,omitempty"`
 }
 
+// Oplog raw op log
 type OpLog struct {
 	Timestamp    bson.MongoTimestamp "ts"
 	HistoryID    int64               "h"
@@ -546,13 +554,13 @@ func (ctx *OpCtxMulti) AddShardListener(
 	configCtx := Start(configSession, opts)
 	ctx.allWg.Add(1)
 	go tailShards(ctx, configCtx, shardOptions, handler)
-	ctx.streams += 1
+	ctx.streams++
 }
 
 func ChainOpFilters(filters ...OpFilter) OpFilter {
 	return func(op *Op) bool {
 		for _, filter := range filters {
-			if filter(op) == false {
+			if !filter(op) {
 				return false
 			}
 		}
@@ -769,7 +777,7 @@ func (this *Op) ParseLogEntry(entry *OpLog, options *Options) (include bool, err
 	this.Operation = entry.Operation
 	this.Timestamp = entry.Timestamp
 	this.Namespace = entry.Namespace
-	if this.shouldParse() == false {
+	if !this.shouldParse() {
 		return
 	}
 	if this.IsCommand() {
@@ -1536,6 +1544,7 @@ func (this *Options) SetDefaults() {
 	if this.BufferDuration == 0 {
 		this.BufferDuration = defaultOpts.BufferDuration
 	}
+	// workerCount must be 1 when ordering type is Oplog, otherwise op msg would be multiple
 	if this.Ordering == Oplog {
 		this.WorkerCount = 1
 	}
@@ -1663,6 +1672,7 @@ func StartMulti(sessions []*mgo.Session, options *Options) *OpCtxMulti {
 	return ctxMulti
 }
 
+// Start listen oplog
 func Start(session *mgo.Session, options *Options) *OpCtx {
 	if options == nil {
 		options = DefaultOptions()
@@ -1679,8 +1689,8 @@ func Start(session *mgo.Session, options *Options) *OpCtx {
 	var directReadWg sync.WaitGroup
 	var allWg sync.WaitGroup
 	streams := len(options.ChangeStreamNs)
-	if options.OpLogDisabled == false {
-		streams += 1
+	if !options.OpLogDisabled {
+		streams++
 	}
 	var seekC = make(chan bson.MongoTimestamp, streams)
 	var pauseC = make(chan bool, streams)
@@ -1700,7 +1710,7 @@ func Start(session *mgo.Session, options *Options) *OpCtx {
 		streams:      streams,
 	}
 
-	if options.OpLogDisabled == false {
+	if !options.OpLogDisabled {
 		for i := 1; i <= options.WorkerCount; i++ {
 			workerNames = append(workerNames, strconv.Itoa(i))
 		}
@@ -1734,7 +1744,7 @@ func Start(session *mgo.Session, options *Options) *OpCtx {
 		go ConsumeChangeStream(ctx, session, ns, options)
 	}
 
-	if options.OpLogDisabled == false {
+	if !options.OpLogDisabled {
 		allWg.Add(1)
 		go TailOps(ctx, session, inOps, options)
 	}
