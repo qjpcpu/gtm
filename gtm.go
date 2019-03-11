@@ -69,7 +69,7 @@ type Options struct {
 
 // Op oplog parsed detail
 type Op struct {
-	Id                interface{}            `json:"_id"`
+	Id                bson.ObjectId          `json:"_id"`
 	Operation         string                 `json:"operation"`
 	Namespace         string                 `json:"namespace"`
 	Data              map[string]interface{} `json:"data,omitempty"`
@@ -106,16 +106,16 @@ type SplitVectorRequest struct {
 }
 
 type ChangeDoc struct {
-	DocKey            map[string]interface{} "documentKey"
-	Id                interface{}            "_id"
-	Operation         string                 "operationType"
-	FullDoc           *bson.Raw              "fullDocument"
-	Namespace         map[string]string      "ns"
-	Timestamp         bson.MongoTimestamp    "clusterTime"
-	UpdateDescription *bson.Raw              "updateDescription"
+	DocKey            map[string]bson.ObjectId "documentKey"
+	Id                interface{}              "_id"
+	Operation         string                   "operationType"
+	FullDoc           *bson.Raw                "fullDocument"
+	Namespace         map[string]string        "ns"
+	Timestamp         bson.MongoTimestamp      "clusterTime"
+	UpdateDescription *bson.Raw                "updateDescription"
 }
 
-func (cd *ChangeDoc) docId() interface{} {
+func (cd *ChangeDoc) docId() bson.ObjectId {
 	return cd.DocKey["_id"]
 }
 
@@ -160,7 +160,7 @@ func (cd *ChangeDoc) mapNs() string {
 }
 
 type Doc struct {
-	Id interface{} "_id"
+	Id bson.ObjectId "_id"
 }
 
 type CollectionStats struct {
@@ -1473,7 +1473,7 @@ func OpFilterForOrdering(ordering OrderingGuarantee, workers []string, worker st
 		ring := hashring.New(workers)
 		return func(op *Op) bool {
 			var key string
-			if op.Id != nil {
+			if op.Id != "" {
 				key = fmt.Sprintf("%v", op.Id)
 			} else {
 				key = op.Namespace
